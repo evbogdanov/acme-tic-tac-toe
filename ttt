@@ -1,0 +1,218 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use feature 'say';
+use experimental 'signatures';
+
+$| = 1;
+
+## ACME WINDOW
+## -----------------------------------------------------------------------------
+
+# Make new window and return its ID
+sub winnew {
+	my $winctl = `9p read acme/new/ctl`;
+	$winctl =~ m/^\s*(\d+)/;
+	return $1;
+}
+
+# Affect the window by sending messages to its controller
+sub winctl ($winid, @messages) {
+	my $message = join ' ', @messages;
+	open my $fh, "| 9p write acme/$winid/ctl";
+	say $fh $message;
+	close $fh;
+}
+
+# Set the name of the window
+sub winname ($winid, $name) {
+	winctl($winid, 'name', $name);
+}
+
+# Append text to body
+sub winwritebody ($winid, $text) {
+	open my $fh, "| 9p write acme/$winid/body";
+	say $fh $text;
+	close $fh;
+}
+
+# Send event
+sub winwriteevent ($winid, $ev) {
+	open my $fh, "| 9p write acme/$winid/event";
+	say $fh "$ev->{orig}$ev->{type}$ev->{beg} $ev->{end}";
+	close $fh;
+}
+
+# Mark the window clean as though it has just been written
+sub winclean ($winid) {
+	winctl($winid, 'clean');
+}
+
+# Delete window or (if window is dirty) print a warning
+sub windel ($winid) {
+	winctl($winid, 'del');
+}
+
+# Delete window without checking for dirtiness
+sub windelete ($winid) {
+	winctl($winid, 'delete');
+}
+
+# Clear window
+sub winclear ($winid) {
+	open my $fh, "| 9p write acme/$winid/addr";
+	print $fh ',';
+	system "9p write acme/$winid/data </dev/null";
+	close $fh;
+}
+
+# Listen to window's events and pass them to callback
+sub wineventloop ($winid, $callback) {
+	open my $fh, "9p read acme/$winid/event 2>/dev/null | acmeevent |";
+	while (my $event = <$fh>) {
+		chomp $event;
+		$callback->($event);
+	}
+	close $fh;
+}
+
+# Parse window event
+sub wineventparse ($event) {
+	if ($event =~ m(
+		^
+		event
+		\s
+		(\w+) # origin of event
+		\s
+		(\w+) # type of event
+		\s
+		(\d+) # beginning of selection
+		\s
+		(\d+) # end of selection
+		\s
+		\d+   # beginning of expanded selection
+		\s
+		\d+   # end of expanded selection
+		\s
+		\d+   # flag
+		\s
+		\d+   # length of event text
+		\s
+		(.+)  # text of event
+		\s
+		''
+		\s
+		''
+		$
+	)x) {
+		return {
+			orig => $1,
+			type => $2,
+			beg  => $3,
+			end  => $4,
+			text => $5
+		};
+	}
+	return undef;
+}
+
+## GAME
+## -----------------------------------------------------------------------------
+
+sub gameboard2str ($board) {
+	sprintf(
+		"%s%s%s\n%s%s%s\n%s%s%s",
+		$board->{0}, $board->{1}, $board->{2},
+		$board->{4}, $board->{5}, $board->{6},
+		$board->{8}, $board->{9}, $board->{10}
+	);
+}
+
+sub gamehaswinner ($board) {
+	my $str = gameboard2str($board);
+	$str    =~ s/\n//g;
+
+	my @matches = (
+		qr(^(X|O)\1\1......$),
+		qr(^...(X|O)\1\1...$),
+		qr(^......(X|O)\1\1$),
+		
+		qr(^(X|O)..\1..\1..$),
+		qr(^.(X|O)..\1..\1.$),
+		qr(^..(X|O)..\1..\1$),
+		
+		qr(^(X|O)...\1...\1$),
+		qr(^..(X|O).\1.\1..$)
+	);
+
+	for my $match (@matches) {
+		return 1 if $str =~ m/$match/;
+	}
+
+	return undef;
+}
+
+sub gamewriteboard ($winid, $board) {
+	winclear($winid);
+	winwritebody($winid, gameboard2str($board));
+	winclean($winid);
+}
+
+sub gamewritewinner ($winid, $player) {
+	winwritebody($winid, "\nWinner is: $player");
+	winclean($winid);
+}
+
+sub gameplay {
+	my $gotwinner;
+	my $winid  = winnew();
+	my $player = 'X';
+	my $board  = {
+		0 => '.', 1 => '.', 2  => '.',
+		4 => '.', 5 => '.', 6  => '.',
+		8 => '.', 9 => '.', 10 => '.'
+	};
+
+	my $callback = sub ($event) {
+		if (my $ev = wineventparse($event)) {
+			my $ev_orig_and_type = lc "$ev->{orig}$ev->{type}";
+
+			# Middle click. Just execute defaults.
+			if ($ev_orig_and_type eq 'mx') {
+				winwriteevent($winid, $ev);
+			}
+
+			# Right click is what I'm interested in
+			elsif ($ev_orig_and_type eq 'ml') {
+				return if $gotwinner;
+
+				my $coord = $ev->{beg};
+				if (exists $board->{$coord} and $board->{$coord} eq '.') {
+					$board->{$coord} = $player;
+					gamewriteboard($winid, $board);
+					if (gamehaswinner($board)) {
+						gamewritewinner($winid, $player);
+						$gotwinner = 1;
+					}
+					$player = ($player eq 'X') ? 'O' : 'X';
+				}
+			}
+		}
+	};
+
+	winname($winid, '/tic_tac_toe/');
+	gamewriteboard($winid, $board);
+	wineventloop($winid, $callback);
+}
+
+gameplay();
+
+## SEE ALSO
+## -----------------------------------------------------------------------------
+
+__END__
+
+acme(1)
+acme(4)
+acmeevent(1)
