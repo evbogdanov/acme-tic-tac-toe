@@ -1,4 +1,4 @@
-# acme_tic_tac_toe
+# acme-tic-tac-toe
 
 Play Tic-tac-toe in Acme text editor.
 
